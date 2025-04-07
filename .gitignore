@@ -1,0 +1,12 @@
+# Ignore dataset
+data/
+data/*
+# Ignore checkpoints (if you want)
+checkpoints/
+checkpoints/*
+
+# Colab, Python junk
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
