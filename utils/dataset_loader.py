@@ -1,57 +1,64 @@
+# utils/dataset_loader.py
+from torch.utils.data import Dataset
+from PIL import Image, UnidentifiedImageError
 import os
 import pandas as pd
-from PIL import Image
-from torch.utils.data import Dataset
-from torchvision import transforms
+from collections import defaultdict
+import random
 
 class ImageCaptionDataset(Dataset):
-    def __init__(self, root_dir, image_size=256):
+    def __init__(self, root_dir, transform=None, use_caption=True):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.use_caption = use_caption
         self.samples = []
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-        ])
+        self.image_to_captions = defaultdict(set)
 
         for subfolder in os.listdir(root_dir):
-            if subfolder.startswith('.') or subfolder == '__MACOSX':
-                continue
-
             subfolder_path = os.path.join(root_dir, subfolder)
-            if not os.path.isdir(subfolder_path):
-                continue
+            if os.path.isdir(subfolder_path):
+                csv_files = [f for f in os.listdir(subfolder_path) if f.endswith('.csv')]
+                for csv_file in csv_files:
+                    csv_path = os.path.join(subfolder_path, csv_file)
+                    try:
+                        df = pd.read_csv(csv_path)
+                        for _, row in df.iterrows():
+                            image_rel_path = row.get('image')
+                            caption = row.get('caption_groq', "")
 
-            # Find any CSV file in the subfolder
-            csv_files = [f for f in os.listdir(subfolder_path) if f.endswith(".csv")]
-            if not csv_files:
-                continue
+                            if not image_rel_path:
+                                continue
 
-            caption_file = os.path.join(subfolder_path, csv_files[0])
+                            image_path = os.path.join(subfolder_path, image_rel_path)
 
-            try:
-                df = pd.read_csv(caption_file)
-                if 'image' not in df.columns or 'caption_groq' not in df.columns:
-                    print(f"⚠️ Skipping {caption_file} — Required columns not found.")
-                    continue
-            except Exception as e:
-                print(f"❌ Error reading {caption_file}: {e}")
-                continue
+                            if os.path.exists(image_path):
+                                try:
+                                    with Image.open(image_path) as img:
+                                        img.verify()
+                                    if not isinstance(caption, str):
+                                        caption = str(caption) if caption is not None else ""
+                                    self.image_to_captions[image_path].add(caption)
+                                except (UnidentifiedImageError, Exception):
+                                    pass
+                    except Exception:
+                        continue
 
-            for _, row in df.iterrows():
-                image_name = row.get("image")
-                caption = row.get("caption_groq")
-                image_path = os.path.join(subfolder_path, str(image_name))
-
-                if image_name and caption and os.path.isfile(image_path):
-                    self.samples.append((image_path, caption))
-
-        print(f"✅ Total samples loaded: {len(self.samples)}")
+        for image_path, captions in self.image_to_captions.items():
+            selected_caption = random.choice(list(captions)) if captions else ""
+            self.samples.append((image_path, selected_caption))
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         image_path, caption = self.samples[idx]
-        image = Image.open(image_path).convert("RGB")
-        image = self.transform(image)
+        try:
+            image = Image.open(image_path).convert("RGB")
+        except:
+            image = Image.new("RGB", (224, 224), (0, 0, 0))
+            caption = ""
+
+        if self.transform:
+            image = self.transform(image)
+
         return image, caption

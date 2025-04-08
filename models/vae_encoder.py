@@ -4,6 +4,8 @@ import torch.nn as nn
 class VAEEncoder(nn.Module):
     def __init__(self, latent_dim=256):
         super().__init__()
+        self.latent_dim = latent_dim  # 👈 Store latent_dim for later use
+        self.flattened_dim = None
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),   # 128x128
             nn.GroupNorm(8, 64),
@@ -24,9 +26,23 @@ class VAEEncoder(nn.Module):
             nn.Flatten()
         )
 
-        self.fc_mu = nn.Linear(512 * 16 * 16, latent_dim)
-        self.fc_logvar = nn.Linear(512 * 16 * 16, latent_dim)
+        self.flattened_dim = None  # we'll compute this dynamically
+        self.fc_mu = None
+        self.fc_logvar = None
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def forward(self, x):
         x = self.encoder(x)
-        return self.fc_mu(x), self.fc_logvar(x)
+        
+        if self.flattened_dim is None:
+            self.flattened_dim = x.shape[1]
+            self.fc_mu = nn.Linear(self.flattened_dim, self.latent_dim).to(x.device)
+            self.fc_logvar = nn.Linear(self.flattened_dim, self.latent_dim).to(x.device)
+
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
+        return mu, logvar
