@@ -1,4 +1,4 @@
-%%writefile /content/Product-design-GenAi-XAI/models/vae_decoder.py
+# %%writefile /content/Product-design-GenAi-XAI/models/vae_decoder.py
 import torch
 import torch.nn as nn
 
