@@ -6,9 +6,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.models import vgg16
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
-
 from utils.dataset_loader import ImageCaptionDataset
 from models.vae_encoder import VAEEncoder
 from models.vae_decoder import VAEDecoder
@@ -102,8 +101,7 @@ optimizer = optim.Adam(
     betas=(0.9, 0.999),
     weight_decay=1e-5
 )
-scaler = GradScaler()
-
+scaler = GradScaler(device_type='cuda')
 # ====================
 # REPARAMETERIZATION
 # ====================
@@ -138,10 +136,9 @@ for epoch in range(EPOCHS):
         z = reparameterize(mu, logvar)
         z_cond = latent_fusion(z, caption_latents)
 
-        with autocast():
+        with autocast(device_type='cuda'):  # ✅ fix warning
             recon_images = decoder(z_cond)
             loss, recon_l, perc_l, kl_l = vae_loss_function(recon_images, images, mu, logvar)
-
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
