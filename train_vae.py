@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.models import vgg16
+from torch.cuda.amp import autocast, GradScaler
+from tqdm import tqdm
 
 from utils.dataset_loader import ImageCaptionDataset
 from models.vae_encoder import VAEEncoder
@@ -22,7 +24,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DATASET_PATH = "/content/data/Furniture Dataset"
 CHECKPOINT_DIR = "/content/Product-design-GenAi-XAI/checkpoints"
+RECON_DIR = os.path.join(CHECKPOINT_DIR, "recon_samples")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+os.makedirs(RECON_DIR, exist_ok=True)
 
 # ====================
 # TRANSFORM
@@ -30,7 +34,7 @@ os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.ToTensor(),
-    transforms.Normalize([0.5] * 3, [0.5] * 3)  # Tanh expects [-1, 1]
+    transforms.Normalize([0.5] * 3, [0.5] * 3)
 ])
 
 # ====================
@@ -83,18 +87,22 @@ def vae_loss_function(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
     perceptual = perceptual_loss(recon_x, x)
     kl_div = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon_loss + 1.0 * perceptual + 0.0005 * kl_div
+    total = recon_loss + 1.0 * perceptual + 0.0005 * kl_div
+    return total, recon_loss.item(), perceptual.item(), kl_div.item()
 
 # ====================
-# OPTIMIZER
+# OPTIMIZER + AMP
 # ====================
 optimizer = optim.Adam(
     list(encoder.parameters()) +
     list(decoder.parameters()) +
     list(caption_projector.parameters()) +
     list(latent_fusion.parameters()),
-    lr=LEARNING_RATE
+    lr=LEARNING_RATE,
+    betas=(0.9, 0.999),
+    weight_decay=1e-5
 )
+scaler = GradScaler()
 
 # ====================
 # REPARAMETERIZATION
@@ -107,13 +115,18 @@ def reparameterize(mu, logvar):
 # ====================
 # TRAIN LOOP
 # ====================
+best_loss = float('inf')
+
 for epoch in range(EPOCHS):
     encoder.train()
     decoder.train()
     caption_projector.train()
     latent_fusion.train()
 
-    for i, (images, captions) in enumerate(dataloader):
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+    epoch_loss = 0.0
+
+    for i, (images, captions) in enumerate(pbar):
         images = images.to(DEVICE)
         tokenized = clip.tokenize(captions, truncate=True).to(DEVICE)
 
@@ -125,19 +138,35 @@ for epoch in range(EPOCHS):
         z = reparameterize(mu, logvar)
         z_cond = latent_fusion(z, caption_latents)
 
-        recon_images = decoder(z_cond)
-        loss = vae_loss_function(recon_images, images, mu, logvar)
+        with autocast():
+            recon_images = decoder(z_cond)
+            loss, recon_l, perc_l, kl_l = vae_loss_function(recon_images, images, mu, logvar)
 
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)  # optional
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
 
-        if i % 10 == 0:
-            print(f"[Epoch {epoch+1}/{EPOCHS}] [Batch {i}] Loss: {loss.item():.4f}")
-            recon_images_save = (recon_images[:4] + 1) / 2.0  # Unnormalize for saving
-            save_image(recon_images_save, f"{CHECKPOINT_DIR}/recon_epoch{epoch+1}_batch{i}.png")
+        epoch_loss += loss.item()
+        if i % 50 == 0:
+            recon_images_save = (recon_images[:4] + 1) / 2.0
+            save_image(recon_images_save, f"{RECON_DIR}/recon_epoch{epoch+1}_batch{i}.png")
+            pbar.set_postfix({
+                "Loss": f"{loss.item():.4f}",
+                "Recon": f"{recon_l:.3f}",
+                "Perc": f"{perc_l:.3f}",
+                "KL": f"{kl_l:.5f}"
+            })
 
-    # Save model checkpoints
+    avg_epoch_loss = epoch_loss / len(dataloader)
+    print(f"Epoch {epoch+1} avg loss: {avg_epoch_loss:.4f}")
+
+    if avg_epoch_loss < best_loss:
+        best_loss = avg_epoch_loss
+        torch.save(encoder.state_dict(), f"{CHECKPOINT_DIR}/best_vae_encoder.pth")
+        torch.save(decoder.state_dict(), f"{CHECKPOINT_DIR}/best_vae_decoder.pth")
+
     torch.save(encoder.state_dict(), f"{CHECKPOINT_DIR}/vae_encoder_epoch{epoch+1}.pth")
     torch.save(decoder.state_dict(), f"{CHECKPOINT_DIR}/vae_decoder_epoch{epoch+1}.pth")
