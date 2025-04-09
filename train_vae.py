@@ -8,6 +8,7 @@ from torchvision.utils import save_image
 from torchvision.models import vgg16
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
+
 from utils.dataset_loader import ImageCaptionDataset
 from models.vae_encoder import VAEEncoder
 from models.vae_decoder import VAEDecoder
@@ -19,9 +20,10 @@ LATENT_DIM = 256
 BATCH_SIZE = 16
 EPOCHS = 20
 LEARNING_RATE = 1e-4
+OUT_RES = 256  # Set to 224 if using 224x224 output resolution
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-DATASET_PATH = "/content/data/Furniture Dataset"
+DATASET_PATH = "/content/data"
 CHECKPOINT_DIR = "/content/Product-design-GenAi-XAI/checkpoints"
 RECON_DIR = os.path.join(CHECKPOINT_DIR, "recon_samples")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -31,7 +33,7 @@ os.makedirs(RECON_DIR, exist_ok=True)
 # TRANSFORM
 # ====================
 transform = transforms.Compose([
-    transforms.Resize((256, 256)),
+    transforms.Resize((OUT_RES, OUT_RES)),
     transforms.ToTensor(),
     transforms.Normalize([0.5] * 3, [0.5] * 3)
 ])
@@ -52,7 +54,7 @@ clip_model.eval()
 # MODELS
 # ====================
 encoder = VAEEncoder(latent_dim=LATENT_DIM).to(DEVICE)
-decoder = VAEDecoder(latent_dim=LATENT_DIM).to(DEVICE)
+decoder = VAEDecoder(latent_dim=LATENT_DIM, out_res=OUT_RES).to(DEVICE)
 caption_projector = nn.Linear(512, LATENT_DIM).to(DEVICE)
 
 class LatentFusion(nn.Module):
@@ -76,17 +78,17 @@ vgg = vgg16(pretrained=True).features[:16].to(DEVICE).eval()
 for param in vgg.parameters():
     param.requires_grad = False
 
-# ====================
-# LOSS FUNCTION
-# ====================
 def perceptual_loss(x, y):
     return nn.functional.mse_loss(vgg(x), vgg(y))
 
-def vae_loss_function(recon_x, x, mu, logvar):
+# ====================
+# VAE LOSS FUNCTION WITH KL ANNEALING
+# ====================
+def vae_loss_function(recon_x, x, mu, logvar, kl_weight=1.0):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
     perceptual = perceptual_loss(recon_x, x)
     kl_div = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    total = recon_loss + 1.0 * perceptual + 0.0005 * kl_div
+    total = 1.0 * recon_loss + 0.1 * perceptual + kl_weight * kl_div
     return total, recon_loss.item(), perceptual.item(), kl_div.item()
 
 # ====================
@@ -101,7 +103,8 @@ optimizer = optim.Adam(
     betas=(0.9, 0.999),
     weight_decay=1e-5
 )
-scaler = GradScaler(device_type='cuda')
+scaler = GradScaler()
+
 # ====================
 # REPARAMETERIZATION
 # ====================
@@ -123,6 +126,7 @@ for epoch in range(EPOCHS):
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{EPOCHS}")
     epoch_loss = 0.0
+    kl_weight = min(1.0, epoch / 10.0)  # KL annealing
 
     for i, (images, captions) in enumerate(pbar):
         images = images.to(DEVICE)
@@ -136,9 +140,10 @@ for epoch in range(EPOCHS):
         z = reparameterize(mu, logvar)
         z_cond = latent_fusion(z, caption_latents)
 
-        with autocast(device_type='cuda'):  # ✅ fix warning
+        with autocast(device_type='cuda'):
             recon_images = decoder(z_cond)
-            loss, recon_l, perc_l, kl_l = vae_loss_function(recon_images, images, mu, logvar)
+            loss, recon_l, perc_l, kl_l = vae_loss_function(recon_images, images, mu, logvar, kl_weight)
+
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -147,14 +152,19 @@ for epoch in range(EPOCHS):
         scaler.update()
 
         epoch_loss += loss.item()
+
         if i % 50 == 0:
             recon_images_save = (recon_images[:4] + 1) / 2.0
-            save_image(recon_images_save, f"{RECON_DIR}/recon_epoch{epoch+1}_batch{i}.png")
+            original_images_save = (images[:4] + 1) / 2.0
+            grid = torch.cat([original_images_save, recon_images_save], dim=0)
+            save_image(grid, f"{RECON_DIR}/recon_epoch{epoch+1}_batch{i}.png", nrow=4)
+            
             pbar.set_postfix({
                 "Loss": f"{loss.item():.4f}",
                 "Recon": f"{recon_l:.3f}",
                 "Perc": f"{perc_l:.3f}",
-                "KL": f"{kl_l:.5f}"
+                "KL": f"{kl_l:.5f}",
+                "KL_wt": f"{kl_weight:.2f}"
             })
 
     avg_epoch_loss = epoch_loss / len(dataloader)
