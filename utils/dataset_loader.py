@@ -1,4 +1,3 @@
-# utils/dataset_loader.py
 from torch.utils.data import Dataset
 from PIL import Image, UnidentifiedImageError
 import os
@@ -16,32 +15,36 @@ class ImageCaptionDataset(Dataset):
 
         for subfolder in os.listdir(root_dir):
             subfolder_path = os.path.join(root_dir, subfolder)
-            if os.path.isdir(subfolder_path):
-                csv_files = [f for f in os.listdir(subfolder_path) if f.endswith('.csv')]
-                for csv_file in csv_files:
-                    csv_path = os.path.join(subfolder_path, csv_file)
-                    try:
-                        df = pd.read_csv(csv_path)
-                        for _, row in df.iterrows():
-                            image_rel_path = row.get('image')
-                            caption = row.get('caption_groq', "")
+            if not os.path.isdir(subfolder_path):
+                continue
 
-                            if not image_rel_path:
-                                continue
+            csv_files = [f for f in os.listdir(subfolder_path) if f.endswith('.csv')]
+            for csv_file in csv_files:
+                csv_path = os.path.join(subfolder_path, csv_file)
+                try:
+                    df = pd.read_csv(csv_path)
+                    for _, row in df.iterrows():
+                        image_rel_path = row.get('image')
+                        caption = row.get('caption_groq', "")
 
-                            image_path = os.path.join(subfolder_path, image_rel_path)
+                        if not image_rel_path:
+                            continue
 
-                            if os.path.exists(image_path):
-                                try:
-                                    with Image.open(image_path) as img:
-                                        img.verify()
-                                    if not isinstance(caption, str):
-                                        caption = str(caption) if caption is not None else ""
-                                    self.image_to_captions[image_path].add(caption)
-                                except (UnidentifiedImageError, Exception):
-                                    pass
-                    except Exception:
-                        continue
+                        image_path = os.path.join(subfolder_path, image_rel_path)
+                        if not os.path.exists(image_path):
+                            continue
+
+                        try:
+                            with Image.open(image_path) as img:
+                                img.verify()
+                            # Normalize caption
+                            if not isinstance(caption, str):
+                                caption = str(caption) if caption is not None else ""
+                            self.image_to_captions[image_path].add(caption)
+                        except (UnidentifiedImageError, Exception):
+                            continue
+                except Exception:
+                    continue
 
         for image_path, captions in self.image_to_captions.items():
             selected_caption = random.choice(list(captions)) if captions else ""
@@ -54,11 +57,13 @@ class ImageCaptionDataset(Dataset):
         image_path, caption = self.samples[idx]
         try:
             image = Image.open(image_path).convert("RGB")
-        except:
-            image = Image.new("RGB", (224, 224), (0, 0, 0))
-            caption = ""
+        except Exception:
+            raise RuntimeError(f"Corrupted image found at {image_path}")
 
         if self.transform:
             image = self.transform(image)
 
-        return image, caption
+        if self.use_caption:
+            return image, caption
+        else:
+            return image
