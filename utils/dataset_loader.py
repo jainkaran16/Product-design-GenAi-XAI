@@ -37,7 +37,6 @@ class ImageCaptionDataset(Dataset):
                         try:
                             with Image.open(image_path) as img:
                                 img.verify()
-                            # Normalize caption
                             if not isinstance(caption, str):
                                 caption = str(caption) if caption is not None else ""
                             self.image_to_captions[image_path].add(caption)
@@ -54,11 +53,17 @@ class ImageCaptionDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        image_path, caption = self.samples[idx]
-        try:
-            image = Image.open(image_path).convert("RGB")
-        except Exception:
-            raise RuntimeError(f"Corrupted image found at {image_path}")
+        retries = 3  # Retry up to 3 times in case of corrupted image
+        for attempt in range(retries):
+            image_path, caption = self.samples[idx]
+            try:
+                image = Image.open(image_path).convert("RGB")
+                break
+            except Exception:
+                print(f"[Warning] Skipping corrupted image: {image_path}")
+                idx = (idx + 1) % len(self.samples)  # Try next image
+        else:
+            raise RuntimeError(f"Too many corrupted images around index {idx}.")
 
         if self.transform:
             image = self.transform(image)
@@ -67,3 +72,4 @@ class ImageCaptionDataset(Dataset):
             return image, caption
         else:
             return image
+

@@ -1,52 +1,65 @@
-# %%writefile /content/Product-design-GenAi-XAI/models/vae_decoder.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class VAEDecoder(nn.Module):
-    def __init__(self, latent_dim=256, out_res=256):
-        super().__init__()
+    def __init__(self, latent_dim, out_res=256):
+        super(VAEDecoder, self).__init__()
+        self.out_res = out_res
+        self.latent_dim = latent_dim
 
+        # Fully connected layer to project latent vector to feature map
         self.fc = nn.Linear(latent_dim, 512 * 4 * 4)
 
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(512, 512, 4, 2, 1),  # 4 → 8
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
+        # Decoder layers with skip connections
+        self.dec1 = self.upconv_block(512, 384)  # 4x4 -> 8x8
+        self.dec2 = self.upconv_block(384, 384)  # 8x8 -> 16x16
+        self.dec3 = self.upconv_block(384, 256)  # 16x16 -> 32x32
+        self.dec4 = self.upconv_block(256, 128)  # 32x32 -> 64x64
+        self.dec5 = self.upconv_block(128, 64)   # 64x64 -> 128x128
+        self.dec6 = self.upconv_block(64, 3, final_layer=True)  # 128x128 -> 256x256
 
-            nn.ConvTranspose2d(512, 512, 4, 2, 1),  # 8 → 16
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
+    def upconv_block(self, in_channels, out_channels, final_layer=False):
+        if not final_layer:
+            return nn.Sequential(
+                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU()
+            )
+        else:
+            return nn.Sequential(
+                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+                nn.Tanh()  # Output range [-1, 1]
+            )
 
-            nn.ConvTranspose2d(512, 256, 4, 2, 1),  # 16 → 32
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
+    def forward(self, z, skip_connections=None):
+    # Project latent vector to feature map
+      x = self.fc(z)
+      x = x.view(x.size(0), 512, 4, 4)
 
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),  # 32 → 64
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
+      # Safe skip connections handling
+      if skip_connections is None:
+          skip_connections = [None] * 5  # total 5 skip connections used
 
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),   # 64 → 128
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
+      x = self.dec1(x)
+      if skip_connections[0] is not None:
+          x = x + skip_connections[0]  # 8x8
 
-            nn.ConvTranspose2d(64, 32, 4, 2, 1),    # 128 → 256
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
+      x = self.dec2(x)
+      if skip_connections[1] is not None:
+          x = x + skip_connections[1]  # 16x16
 
-        # Output conv layer
-        self.out_conv = nn.Conv2d(32, 3, kernel_size=3, stride=1, padding=1)
+      x = self.dec3(x)
+      if skip_connections[2] is not None:
+          x = x + skip_connections[2]  # 32x32
 
-        self.final_activation = nn.Tanh()
-        self.out_res = out_res
+      x = self.dec4(x)
+      if skip_connections[3] is not None:
+          x = x + skip_connections[3]  # 64x64
 
-    def forward(self, z):
-        x = self.fc(z).view(-1, 512, 4, 4)
-        x = self.decoder(x)
-        x = self.out_conv(x)
+      x = self.dec5(x)
+      if skip_connections[4] is not None:
+          x = x + skip_connections[4]  # 128x128
 
-        if self.out_res == 224:
-            x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+      x = self.dec6(x)  # 256x256
 
-        return self.final_activation(x)
+      return x
