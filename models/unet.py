@@ -22,11 +22,11 @@ class UNetModel(nn.Module):
         super().__init__()
 
         # Embed timestep and condition (both scalar to channel map)
-        self.time_embed = nn.Linear(1, 1)
-        self.cond_embed = nn.Linear(cond_dim, 1)
+        self.time_embed = nn.Linear(1, base_channels)
+        self.cond_embed = nn.Linear(cond_dim, base_channels)
 
         # Downsampling encoder blocks
-        self.enc1 = DoubleConv(in_channels + 1 + 1, base_channels)  # latent + t + cond
+        self.enc1 = DoubleConv(in_channels + base_channels, base_channels)  # latent + t + cond
         self.enc2 = DoubleConv(base_channels, base_channels * 2)
 
         # Bottleneck
@@ -40,13 +40,25 @@ class UNetModel(nn.Module):
         self.final = nn.Conv2d(base_channels, in_channels, 1)
 
     def forward(self, x, t, cond):
-        # Embed timestep and condition (projected to 1x1 maps)
-        t_embed = self.time_embed(t.unsqueeze(-1)).unsqueeze(-1).unsqueeze(-1)  # [B,1,1,1]
-        c_embed = self.cond_embed(cond).unsqueeze(-1).unsqueeze(-1)             # [B,1,1,1]
+        """
+        Args:
+            x: Noisy latent tensor (B, C, H, W)
+            t: Time steps (B, 1) for timestep embedding
+            cond: Condition (caption embedding, B, cond_dim)
+        
+        Returns:
+            Predicted noise (B, C, H, W)
+        """
+
+        # Embed timestep and condition (projected to base_channels)
+        t_embed = self.time_embed(t.unsqueeze(-1))  # [B, base_channels]
+        c_embed = self.cond_embed(cond)             # [B, base_channels]
 
         # Expand and concatenate along channel axis
-        t_channel = t_embed.expand_as(x[:, :1])  # [B,1,H,W]
-        c_channel = c_embed.expand_as(x[:, :1])  # [B,1,H,W]
+        t_channel = t_embed.unsqueeze(-1).unsqueeze(-1).expand_as(x[:, :1])  # [B, base_channels, H, W]
+        c_channel = c_embed.unsqueeze(-1).unsqueeze(-1).expand_as(x[:, :1])  # [B, base_channels, H, W]
+        
+        # Concatenate input with condition and timestep embeddings
         x = torch.cat([x, t_channel, c_channel], dim=1)
 
         # Encoder
