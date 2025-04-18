@@ -1,6 +1,6 @@
 import sys
 sys.path.append("/content/Product-design-GenAi-XAI")
-print("hi")
+# print("hi")
 
 import torch
 from torch import nn, optim
@@ -48,7 +48,7 @@ vae_decoder = VAEDecoder(latent_dim=latent_dim).to(device)
 
 # Load Caption Projector and LatentFusion from .pth files
 caption_encoder = CaptionProjector(latent_dim=latent_dim).to(device)
-caption_encoder.load_state_dict(torch.load('/content/Product-design-GenAi-XAI/best_caption_projector.pth'))
+caption_encoder.load_state_dict(torch.load('/content/drive/MyDrive/genai_checkpoints/best_caption_projector.pth'))
 
 latent_fusion = LatentFusion(latent_dim=latent_dim).to(device)  # Assuming LatentFusion is a class you have
 latent_fusion.load_state_dict(torch.load('/content/drive/MyDrive/genai_checkpoints/best_latent_fusion.pth'))
@@ -78,24 +78,40 @@ for epoch in range(epochs):
     epoch_loss = 0.0
     for i, (images, captions) in enumerate(dataloader):
         images = images.to(device)
-        noise = torch.randn_like(images)
 
+        # VAE encoding to get latents
         with torch.no_grad():
-            latents = vae_encoder(images)  # (B, 4, 32, 32) assuming latent space
+            latents = vae_encoder(images)[0]  # (B, 4, 32, 32) assuming latent space
 
+        # Generate random noise
+        noise = torch.randn_like(latents)
+
+        # Sample timesteps and normalize them
         timesteps = torch.randint(0, scheduler.timesteps, (images.size(0),), device=device).long()
         timesteps_norm = timesteps.float() / scheduler.timesteps
 
+        # Add noise to latents
         noisy_latents = scheduler.add_noise(latents, noise, timesteps)
 
+        # Encoding captions (text to latent space)
         with torch.no_grad():
             cond = caption_encoder(captions)  # (B, latent_dim)
 
         # Use LatentFusion for combining text and image latents
         fused_latents = latent_fusion(latents, cond)
 
+        # Generate predicted noise
         pred_noise = unet(noisy_latents, timesteps_norm.unsqueeze(1), fused_latents)
+        if len(latents.shape) == 4:  # If latents have spatial dimensions (B, C, H, W)
+            # Reshape `noise` to match the shape of `pred_noise` (B, 128, H, W)
+            noise = noise.view(noise.size(0), 128, latents.size(2), latents.size(3))
+        else:
+            # If latents do not have spatial dimensions, assume flat latents
+            # print("yes")
 
+            noise = noise.view(noise.size(0), 128)  # Flatten to match the 2D shape of noise
+
+        # Loss function
         loss = loss_fn(pred_noise, noise)
         optimizer.zero_grad()
         loss.backward()

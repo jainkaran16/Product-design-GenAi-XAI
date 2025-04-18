@@ -17,6 +17,7 @@ class LinearNoiseScheduler:
             noise: random noise tensor (B, C, H, W)
             t: tensor of timestep indices (B,)
         """
+        # print(x0)
         # Corrected: use t.cpu() for indexing, then move result to x0.device
         alpha_t = self.alphas_cumprod[t.cpu()].sqrt().to(x0.device).view(-1, 1, 1, 1)
         one_minus_alpha_t = (1 - self.alphas_cumprod[t.cpu()]).sqrt().to(x0.device).view(-1, 1, 1, 1)
